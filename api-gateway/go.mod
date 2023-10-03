@@ -5,6 +5,7 @@ go 1.20
 require (
 	github.com/IBM/sarama v1.41.2
 	github.com/gin-gonic/gin v1.9.1
+	github.com/google/uuid v1.3.1
 )
 
 require (

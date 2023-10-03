@@ -2,12 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type MyMessage struct {
@@ -24,26 +25,30 @@ func main() {
 
 	producer, err := sarama.NewSyncProducer([]string{"kafka:9092"}, nil)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create producer: %v", err)
 	}
 	defer producer.Close()
 
 	consumer, err := sarama.NewConsumer([]string{"kafka:9092"}, nil)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create consumer: %v", err)
 	}
 	defer consumer.Close()
 
 	partConsumer, err := consumer.ConsumePartition("pong", 0, sarama.OffsetNewest)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to consume partition: %v", err)
 	}
 	defer partConsumer.Close()
 
 	go func() {
 		for {
 			select {
-			case msg := <-partConsumer.Messages():
+			case msg, ok := <-partConsumer.Messages():
+				if !ok {
+					log.Println("Channel closed, exiting goroutine")
+					return
+				}
 				responseID := string(msg.Key)
 				mu.Lock()
 				ch, exists := responseChannels[responseID]
@@ -58,7 +63,7 @@ func main() {
 
 	router := gin.Default()
 	router.GET("/ping", func(c *gin.Context) {
-		requestID := fmt.Sprintf("%d", time.Now().UnixNano())
+		requestID := uuid.New().String()
 
 		message := MyMessage{
 			ID:    requestID,
@@ -68,7 +73,7 @@ func main() {
 
 		bytes, err := json.Marshal(message)
 		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			c.JSON(500, gin.H{"error": "failed to marshal JSON"})
 			return
 		}
 
@@ -77,7 +82,13 @@ func main() {
 			Key:   sarama.StringEncoder(requestID),
 			Value: sarama.ByteEncoder(bytes),
 		}
-		producer.SendMessage(msg)
+
+		_, _, err = producer.SendMessage(msg)
+		if err != nil {
+			log.Printf("Failed to send message to Kafka: %v", err)
+			c.JSON(500, gin.H{"error": "failed to send message to Kafka"})
+			return
+		}
 
 		responseCh := make(chan *sarama.ConsumerMessage)
 		mu.Lock()
@@ -88,9 +99,14 @@ func main() {
 		case responseMsg := <-responseCh:
 			c.JSON(200, gin.H{"message": string(responseMsg.Value)})
 		case <-time.After(10 * time.Second):
+			mu.Lock()
+			delete(responseChannels, requestID)
+			mu.Unlock()
 			c.JSON(500, gin.H{"error": "timeout waiting for response"})
 		}
 	})
 
-	router.Run(":8080")
+	if err := router.Run(":8080"); err != nil {
+		log.Fatalf("Failed to run server: %v", err)
+	}
 }
